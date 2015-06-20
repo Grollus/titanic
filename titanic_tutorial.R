@@ -88,6 +88,8 @@ write.csv(submit, file = "tree1.csv", row.names = FALSE)
 # Little bit of feature engineering
 
 # first let's merge the train and test so all features are included in both sets
+train <- read.csv("train.csv")
+test <- read.csv("test.csv")
 test$Survived <- NA
 combi <- rbind(train, test)
 
@@ -140,3 +142,81 @@ tree.fit2 <- rpart(Survived ~ Pclass + Sex + Age + SibSp + Parch + Fare + Embark
 tree2.prediction <- predict(tree.fit2, test, type = "class")
 submit <- data.frame(PassengerId = test$PassengerId, Survived = tree2.prediction)
 write.csv(submit, "engineeredfeatures1.csv", row.names = FALSE)
+
+
+### ===============================================================================
+# More complex modeling
+# Going to use random forest--need to deal with missing values before running model
+# age has about 20% missing values
+summary(combi$Age)
+
+# using a shallow tree to predict the ages instead of naive median/mean
+Agefit <- rpart(Age ~ Pclass + Sex + SibSp + Parch + Fare + Embarked + Title +
+                  FamilySize, data = combi[!is.na(combi$Age),], method = "anova")
+combi$Age[is.na(combi$Age)] <- predict(Agefit, combi[is.na(combi$Age),])
+
+# checking for other missing values and replacing
+summary(combi)
+
+combi$Embarked[which(combi$Embarked == "")] = "S"
+combi$Embarked <- factor(combi$Embarked)
+
+combi$Fare[which(is.na(combi$Fare))] <- median(combi$Fare, na.rm = TRUE)
+
+# Random forest can only deal with factors with < 32 levels 
+# Means we need to deal with FamilyID
+combi$FamilyID2 <- combi$FamilyID
+combi$FamilyID2 <- as.character(combi$FamilyID2)
+combi$FamilyID2[combi$FamilySize <= 3] <- "Small"
+combi$FamilyID2 <- factor(combi$FamilyID2)
+
+# splitting combi back to train and test sets
+train <- combi[1:891,]
+test <- combi[892:1309,]
+
+### running randomForest model
+library(randomForest)
+set.seed(123)
+# casting Survived as factor changes the model to classification instead of regression
+# Importance allows you to inspect the variable importance
+rf.fit <- randomForest(as.factor(Survived) ~ Pclass + Sex + Age + SibSp + Parch +
+                         Fare + Embarked + Title + FamilySize + FamilyID2,
+                       data = train, importance = TRUE, ntree = 2000)
+
+# Looking into variable importance
+varImpPlot(rf.fit)
+
+# submitting first rf effort
+rf.prediction <- predict(rf.fit, test)
+submit <- data.frame(PassengerId = test$PassengerId, Survived = rf.prediction)
+write.csv(submit, file = "rf1.csv", row.names = FALSE)
+
+### ================================================================================
+# conditional inference tree
+library(party)
+set.seed(415)
+party.fit <- cforest(as.factor(Survived) ~ Pclass + Sex + Age + SibSp + Parch +
+                       Fare + Embarked + Title + FamilySize + FamilyID,
+                     data = train, controls = cforest_unbiased(ntree = 2000, mtry = 3))
+# conditional tree prediction
+cforest.prediction <- predict(party.fit, test, OOB = TRUE, type = "response")
+submit <- data.frame(PassengerId = test$PassengerId, Survived = cforest.prediction)
+write.csv(submit, file = "cforest1.csv", row.names = FALSE)
+
+
+### ===============================================================================
+# Exploring Cabin variable
+# First get the non-missing Cabin information into two new variables--Deck and 
+# Location
+combi$Deck <- sapply(as.character(combi$Cabin),
+                     FUN = function(x) {strsplit(x, split = "")[[1]][1]})
+combi$Deck[which(is.na(combi$Deck))] <- "UNK"
+combi$Deck <- factor(combi$Deck)
+library(stringr)
+library(plyr)
+combi$cabin.last.digit <- str_sub(combi$Cabin, -1)
+combi$Location <- "UNK"
+combi$Location[which(combi$cabin.last.digit %in% c("0", "2", "4", "6", "8"))] <- "Port"
+combi$Location[which(combi$cabin.last.digit %in% c("1", "3", "5", "7", "9"))] <- "Starboard"
+combi$Location <- factor(combi$Location)
+combi$cabin.last.digit <- NULL
